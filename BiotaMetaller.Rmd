@@ -1,0 +1,136 @@
+---
+runtime: shiny
+title: "BiotaMetaller"
+date: 2019-05-21
+author: "Martin Sköld"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(tidyverse)
+library(readxl)
+library(ggmap)
+library(rnaturalearth)
+library(rnaturalearthdata)
+theme_set(theme_minimal())
+```
+
+## Data wrangling (data downloaded from  [ivl](https://dvsb.ivl.se/SokResMETALS?m=2&from=1849&tom=2016&laen=AA) 2019-05-21)
+
+```{r}
+BiotaMetaller <- read_excel("BiotaMetaller.xlsx", skip = 1, guess_max = 5000) %>% 
+  select(Station, Longitude, Latitude, Provdatum, ends_with("DW")) %>% 
+  mutate_if(is.logical, as.double) %>% 
+  mutate(Year = format(Provdatum, "%Y") %>% as.numeric()) %>% 
+  gather(key = Metal, value = Concentration, ends_with("DW")) %>% 
+  mutate(Metal = str_sub(Metal, 1, 2)) %>% 
+  filter(!is.na(Concentration))
+glimpse(BiotaMetaller)
+```
+
+
+## Webb-app (time series)
+
+```{r, warning=FALSE, message=FALSE}
+shinyApp(
+  ui <- fluidPage(
+    fluidRow(
+      column(4,
+             wellPanel(
+               selectInput("Metal", "Metal",
+                           choices = BiotaMetaller %>% pull(Metal) %>% unique()
+               ),
+               selectInput("Stations", "Station", 
+                           choices = BiotaMetaller %>% pull(Station) %>% unique(), 
+                           selected = "Abiskojaure",
+                           multiple = TRUE),
+               sliderInput("Years", "Years", 1965, 2015, c(2006, 2015), sep = ""),
+               selectInput("Trend", "Trend", choices = c("Log-linear", "Smooth")),
+               checkboxInput("Interval", "Confidence intervall (95%)")
+             )
+      ),
+      column(8,
+             plotOutput("plot"))
+    )
+  ),
+  server <- function(input, output) {
+    plot_data <- reactive({
+      BiotaMetaller %>% 
+        filter(Metal == input$Metal, 
+               Station %in% input$Stations,
+               Year %in% input$Years[1]:input$Years[2])
+    })
+    output$plot <- renderPlot(
+      plot_data() %>% 
+        ggplot(aes(x = Provdatum, y = log(Concentration), color = Station)) + 
+        geom_point(alpha = .5) + 
+        geom_smooth(se = input$Interval, 
+                    method = ifelse(input$Trend == "Log-linear", "lm", "loess"))
+    )
+  }
+  
+)
+```
+
+
+## Trends summary
+
+```{r}
+BiotaMetaller %>% 
+  filter(Year > 2005) %>% 
+  filter(Concentration > 0) %>% 
+  group_by(Station, Year, Metal) %>% 
+  summarise(mean_Conc = mean(log(Concentration), na.rm = TRUE)) %>% 
+  group_by(Station, Metal) %>% 
+  nest() %>% 
+  filter(map(data, nrow) > 5) %>%
+  mutate(model = map(data, ~lm(mean_Conc ~ Year, .x)), slope = map_dbl(model, ~coef(.x) %>% .[2])) %>% 
+  ggplot() + 
+  geom_histogram(aes(x = (exp(slope)-1)*100)) + 
+  facet_wrap(~ Metal) +  
+  geom_vline(xintercept = 0, color = "red") + 
+  xlab("Average yearly change (%) 2006-2015 (stations with more than 5 samplings)") + 
+  xlim(c(-30, 30))
+```
+
+## Webb-app (map)
+
+```{r}
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+shinyApp(
+  ui <- fluidPage(
+    fluidRow(
+      column(4,
+             wellPanel(
+               selectInput("Metal", "Metal",
+                           choices = BiotaMetaller %>% pull(Metal) %>% unique()
+               ),
+               sliderInput("Year", "Year", 1965, 2015, 2015, sep = "")
+             )), column(8,
+                        plotOutput(outputId = "mymap", height = "510px")
+             )
+    )),
+  
+  server <- function(input, output){
+    mapdata <- reactive({
+      BiotaMetaller %>% 
+        filter(Year == input$Year,
+               Metal == input$Metal,
+               Concentration > 0) %>% 
+        group_by(Station, Longitude, Latitude) %>% 
+        summarise(mean_Conc = mean(log(Concentration), na.rm = TRUE)) %>% 
+        ungroup()
+    })
+    
+    output$mymap <- renderPlot({ggplot(data = world_map) + 
+        geom_sf() + 
+        coord_sf(xlim = c(8, 25), ylim = c(54, 70), expand = FALSE) +
+        geom_point(data = mapdata(), aes(x = Longitude, y = Latitude, color = mean_Conc, size = mean_Conc), alpha = .8) +
+        guides(size = FALSE) +
+        labs(color = "Mean log-concentration")})
+  }
+)
+```
+
