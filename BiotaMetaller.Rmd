@@ -1,7 +1,6 @@
 ---
 runtime: shiny
 title: "BiotaMetaller"
-date: 2019-05-21
 author: "Martin Sköld"
 output: html_document
 ---
@@ -13,13 +12,17 @@ library(readxl)
 library(ggmap)
 library(rnaturalearth)
 library(rnaturalearthdata)
+library(lmtest)
+library(cowplot)
+library(rgeos)
 theme_set(theme_minimal())
 ```
 
 ## Data wrangling (data downloaded from  [ivl](https://dvsb.ivl.se/SokResMETALS?m=2&from=1849&tom=2016&laen=AA) 2019-05-21)
 
 ```{r}
-BiotaMetaller <- read_excel("BiotaMetaller.xlsx", skip = 1, guess_max = 5000) %>% 
+BiotaMetaller <- read_excel("BiotaMetaller.xlsx", 
+                            skip = 1, guess_max = 5000) %>% 
   select(Station, Longitude, Latitude, Provdatum, ends_with("DW")) %>% 
   mutate_if(is.logical, as.double) %>% 
   mutate(Year = format(Provdatum, "%Y") %>% as.numeric()) %>% 
@@ -33,7 +36,7 @@ glimpse(BiotaMetaller)
 ## Webb-app (time series)
 
 ```{r, warning=FALSE, message=FALSE}
-shinyApp(
+shinyApp(options = list(height = 500),
   ui <- fluidPage(
     fluidRow(
       column(4,
@@ -94,21 +97,38 @@ BiotaMetaller %>%
   xlim(c(-30, 30))
 ```
 
+## Serial dependence test, P-values
+
+```{r}
+BiotaMetaller %>% 
+  filter(Year > 1965) %>% 
+  filter(Concentration > 0) %>% 
+  filter(!is.na(log(Concentration))) %>% 
+  group_by(Station, Year, Metal) %>% 
+  summarise(m = mean(log(Concentration), na.rm = TRUE)) %>% 
+  ungroup() %>% 
+  group_by(Station, Metal) %>% nest() %>% 
+  filter(map(data, nrow) > 5) %>% 
+  mutate(model = map(data, ~lm(m ~ Year,.x)), slope = map_dbl(model, ~coef(.x) %>% .[2]),
+         dw_p = map_dbl(data, ~dwtest(m ~ Year, data = .x) %>% .["p.value"] %>% unlist())) -> model_df2
+model_df2 %>% ggplot() + geom_histogram(aes(x = dw_p), binwidth = 0.05) + facet_wrap(~ Metal) + theme_minimal() + xlab("P-värde (Durbin-Watson test)")
+
+
 ## Webb-app (map)
 
 ```{r}
 world_map <- ne_countries(scale = "medium", returnclass = "sf")
 
-shinyApp(
+shinyApp(options = list(height = 800),
   ui <- fluidPage(
     fluidRow(
-      column(4,
+      column(2,
              wellPanel(
                selectInput("Metal", "Metal",
                            choices = BiotaMetaller %>% pull(Metal) %>% unique()
                ),
                sliderInput("Year", "Year", 1965, 2015, 2015, sep = "")
-             )), column(8,
+             )), column(10,
                         plotOutput(outputId = "mymap", height = "510px")
              )
     )),
@@ -124,12 +144,13 @@ shinyApp(
         ungroup()
     })
     
-    output$mymap <- renderPlot({ggplot(data = world_map) + 
+    output$mymap <- renderPlot({
+      plot_grid(ggplot(data = world_map) + 
         geom_sf() + 
         coord_sf(xlim = c(8, 25), ylim = c(54, 70), expand = FALSE) +
-        geom_point(data = mapdata(), aes(x = Longitude, y = Latitude, color = mean_Conc, size = mean_Conc), alpha = .8) +
-        guides(size = FALSE) +
-        labs(color = "Mean log-concentration")})
+        geom_point(data = mapdata(), aes(x = Longitude, y = Latitude, color = mean_Conc, size = mean_Conc), alpha = .8) + 
+          theme(legend.position = "none"),
+        ggplot(mapdata(), aes(x = fct_reorder(Station, Latitude), y = exp(mean_Conc))) + geom_col()+  coord_flip() +xlab("") +ylab("Concentration"))})
   }
 )
 ```
